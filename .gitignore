@@ -1,0 +1,26 @@
+# Maven
+/target/
+
+# IDE and editor metadata
+/.idea/
+/.vscode/
+*.iml
+*.ipr
+*.iws
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and local databases
+*.log
+*.mv.db
+*.trace.db
+
+# Confidential take-home materials are not part of the submission
+*.pdf

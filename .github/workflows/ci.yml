@@ -1,0 +1,50 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Java 17
+        uses: actions/setup-java@7a445ee88d4e23b52c33ce67818e533d2ac3c38e # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Compile, test, and package
+        run: mvn --batch-mode --no-transfer-progress clean verify
+
+      - name: Require the PostgreSQL concurrency test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("target/surefire-reports/TEST-io.github.lalathomas.walletledger.wallet.application.PostgresWalletConcurrencyIntegrationTest.xml")
+          if not report.exists():
+              raise SystemExit(f"Required PostgreSQL test report is missing: {report}")
+
+          suite = ElementTree.parse(report).getroot()
+          skipped = int(suite.attrib.get("skipped", "0"))
+          failures = int(suite.attrib.get("failures", "0"))
+          errors = int(suite.attrib.get("errors", "0"))
+          tests = int(suite.attrib.get("tests", "0"))
+          if tests != 1 or skipped != 0 or failures != 0 or errors != 0:
+              raise SystemExit(
+                  "PostgreSQL concurrency verification must run and pass "
+                  f"(tests={tests}, skipped={skipped}, failures={failures}, errors={errors})"
+              )
+          PY
