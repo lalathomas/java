@@ -3,6 +3,9 @@ package io.github.lalathomas.walletledger.wallet.application;
 public enum WalletErrorCode {
     WALLET_NOT_FOUND,
     WALLET_ALREADY_EXISTS,
+    TRANSACTION_NOT_FOUND,
+    TRANSACTION_NOT_REFUNDABLE,
+    DEBIT_ALREADY_REFUNDED,
     INSUFFICIENT_FUNDS,
     IDEMPOTENCY_CONFLICT,
     INVALID_AMOUNT,

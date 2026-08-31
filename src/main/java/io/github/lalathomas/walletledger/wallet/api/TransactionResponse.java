@@ -2,6 +2,7 @@ package io.github.lalathomas.walletledger.wallet.api;
 
 import io.github.lalathomas.walletledger.wallet.application.LedgerEntryView;
 import io.github.lalathomas.walletledger.wallet.domain.TransactionType;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -13,6 +14,12 @@ public record TransactionResponse(
         long balanceAfter,
         String reason,
         String referenceId,
+        @Schema(
+                description = "Original debit transaction ID for a refund credit; null otherwise",
+                types = {"string", "null"},
+                format = "uuid"
+        )
+        UUID refundedDebitId,
         Instant createdAt
 ) {
     public static TransactionResponse from(LedgerEntryView entry) {
@@ -23,6 +30,7 @@ public record TransactionResponse(
                 entry.balanceAfter(),
                 entry.reason(),
                 entry.referenceId(),
+                entry.refundedDebitId(),
                 entry.createdAt()
         );
     }

@@ -96,6 +96,34 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     @Override
+    protected ResponseEntity<Object> handleExceptionInternal(
+            Exception exception,
+            Object body,
+            HttpHeaders headers,
+            HttpStatusCode statusCode,
+            WebRequest request
+    ) {
+        HttpStatus status = HttpStatus.valueOf(statusCode.value());
+        Object responseBody = body instanceof ApiErrorResponse
+                ? body
+                : errorBody(
+                        status,
+                        frameworkErrorCode(status),
+                        frameworkErrorMessage(status),
+                        pathFrom(request),
+                        Map.of(),
+                        Map.of()
+                );
+        return super.handleExceptionInternal(
+                exception,
+                responseBody,
+                headers,
+                statusCode,
+                request
+        );
+    }
+
+    @Override
     protected ResponseEntity<Object> handleMethodArgumentNotValid(
             MethodArgumentNotValidException exception,
             HttpHeaders headers,
@@ -110,14 +138,20 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 fieldErrors.putIfAbsent("request", error.getDefaultMessage())
         );
 
-        return ResponseEntity.badRequest().body(errorBody(
-                HttpStatus.BAD_REQUEST,
-                "VALIDATION_FAILED",
-                "Request validation failed",
-                pathFrom(request),
-                fieldErrors,
-                Map.of()
-        ));
+        return handleExceptionInternal(
+                exception,
+                errorBody(
+                        HttpStatus.BAD_REQUEST,
+                        "VALIDATION_FAILED",
+                        "Request validation failed",
+                        pathFrom(request),
+                        fieldErrors,
+                        Map.of()
+                ),
+                headers,
+                status,
+                request
+        );
     }
 
     @Override
@@ -127,14 +161,20 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             HttpStatusCode status,
             WebRequest request
     ) {
-        return ResponseEntity.badRequest().body(errorBody(
-                HttpStatus.BAD_REQUEST,
-                "MALFORMED_REQUEST",
-                "Request body is missing or contains invalid JSON",
-                pathFrom(request),
-                Map.of(),
-                Map.of()
-        ));
+        return handleExceptionInternal(
+                exception,
+                errorBody(
+                        HttpStatus.BAD_REQUEST,
+                        "MALFORMED_REQUEST",
+                        "Request body is missing or contains invalid JSON",
+                        pathFrom(request),
+                        Map.of(),
+                        Map.of()
+                ),
+                headers,
+                status,
+                request
+        );
     }
 
     @Override
@@ -144,14 +184,20 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             HttpStatusCode status,
             WebRequest request
     ) {
-        return ResponseEntity.badRequest().body(errorBody(
-                HttpStatus.BAD_REQUEST,
-                "MISSING_REQUEST_VALUE",
-                "A required header, query parameter, or path value is missing",
-                pathFrom(request),
-                Map.of(),
-                Map.of()
-        ));
+        return handleExceptionInternal(
+                exception,
+                errorBody(
+                        HttpStatus.BAD_REQUEST,
+                        "MISSING_REQUEST_VALUE",
+                        "A required header, query parameter, or path value is missing",
+                        pathFrom(request),
+                        Map.of(),
+                        Map.of()
+                ),
+                headers,
+                status,
+                request
+        );
     }
 
     @Override
@@ -161,21 +207,45 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             HttpStatusCode status,
             WebRequest request
     ) {
-        return ResponseEntity.badRequest().body(errorBody(
-                HttpStatus.BAD_REQUEST,
-                "INVALID_PARAMETER",
-                "A path or query parameter has an invalid value",
-                pathFrom(request),
-                Map.of(),
-                Map.of()
-        ));
+        return handleExceptionInternal(
+                exception,
+                errorBody(
+                        HttpStatus.BAD_REQUEST,
+                        "INVALID_PARAMETER",
+                        "A path or query parameter has an invalid value",
+                        pathFrom(request),
+                        Map.of(),
+                        Map.of()
+                ),
+                headers,
+                status,
+                request
+        );
+    }
+
+    private static String frameworkErrorCode(HttpStatus status) {
+        return "HTTP_" + status.name();
+    }
+
+    private static String frameworkErrorMessage(HttpStatus status) {
+        return switch (status) {
+            case NOT_FOUND -> "No endpoint exists for the requested path";
+            case METHOD_NOT_ALLOWED -> "The HTTP method is not supported for this endpoint";
+            case NOT_ACCEPTABLE -> "The requested response media type is not supported";
+            case UNSUPPORTED_MEDIA_TYPE -> "The request media type is not supported";
+            default -> status.is5xxServerError()
+                    ? "An unexpected HTTP processing error occurred"
+                    : "The HTTP request could not be processed";
+        };
     }
 
     private static HttpStatus statusFor(WalletErrorCode code) {
         return switch (code) {
-            case WALLET_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case WALLET_ALREADY_EXISTS, IDEMPOTENCY_CONFLICT -> HttpStatus.CONFLICT;
-            case INSUFFICIENT_FUNDS, BALANCE_OVERFLOW -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case WALLET_NOT_FOUND, TRANSACTION_NOT_FOUND -> HttpStatus.NOT_FOUND;
+            case WALLET_ALREADY_EXISTS, IDEMPOTENCY_CONFLICT, DEBIT_ALREADY_REFUNDED ->
+                    HttpStatus.CONFLICT;
+            case INSUFFICIENT_FUNDS, BALANCE_OVERFLOW, TRANSACTION_NOT_REFUNDABLE ->
+                    HttpStatus.UNPROCESSABLE_ENTITY;
             case INVALID_AMOUNT, INVALID_REQUEST -> HttpStatus.BAD_REQUEST;
         };
     }
@@ -195,6 +265,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 code,
                 message,
                 path,
+                CorrelationIdFilter.currentCorrelationId(),
                 fieldErrors,
                 details
         );

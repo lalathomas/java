@@ -13,6 +13,7 @@ spring:
   jackson:
     deserialization:
       accept-float-as-int: false
+      fail-on-unknown-properties: true
   flyway:
     enabled: true
   jpa:
@@ -29,6 +30,50 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+      show-details: never
+    info:
+      enabled: true
+    prometheus:
+      access: read-only
+  info:
+    env:
+      enabled: true
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Concurrency-safe wallet ledger service
+    api-version: v1
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+    version: OPENAPI_3_1
+  swagger-ui:
+    path: /swagger-ui.html
+    disable-swagger-default-url: true
+    operations-sorter: alpha
+    tags-sorter: alpha
+
 server:
   shutdown: graceful
   error:
@@ -36,6 +81,8 @@ server:
     include-stacktrace: never
 
 logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level correlationId=%X{correlationId:-none} [%thread] %logger{36} - %msg%n"
   level:
     root: INFO
     io.github.lalathomas.walletledger: INFO

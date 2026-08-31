@@ -10,6 +10,7 @@ public record ApiErrorResponse(
         String code,
         String message,
         String path,
+        String correlationId,
         Map<String, String> fieldErrors,
         Map<String, Object> details
 ) {

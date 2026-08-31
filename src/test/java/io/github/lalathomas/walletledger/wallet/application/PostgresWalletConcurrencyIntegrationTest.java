@@ -103,6 +103,164 @@ class PostgresWalletConcurrencyIntegrationTest {
         assertThat(walletService.getHistory(duplicatePlayerId, 0, 20).totalElements()).isEqualTo(1);
     }
 
+    @Test
+    void postgresRefundLockSerializesSameKeyAndDistinctKeyRaces() throws Exception {
+        UUID sameKeyPlayerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                sameKeyPlayerId,
+                new MoneyMovementCommand(
+                        100,
+                        "Initial balance",
+                        "postgres-refund-initial-1",
+                        "postgres-refund-credit-1"
+                )
+        );
+        MoneyMovementResult sameKeyDebit = walletService.debit(
+                sameKeyPlayerId,
+                new MoneyMovementCommand(
+                        30,
+                        "Purchase",
+                        "postgres-refund-debit-1",
+                        "postgres-refund-debit-key-1"
+                )
+        );
+        RefundCommand sameRefund = new RefundCommand(
+                "Concurrent refund",
+                "postgres-same-refund",
+                "postgres-same-refund-key"
+        );
+
+        List<MoneyMovementResult> sameKeyResults = runConcurrently(
+                12,
+                ignored -> walletService.refund(
+                        sameKeyPlayerId,
+                        sameKeyDebit.transactionId(),
+                        sameRefund
+                )
+        );
+        assertThat(sameKeyResults)
+                .extracting(MoneyMovementResult::transactionId)
+                .containsOnly(sameKeyResults.get(0).transactionId());
+        assertThat(sameKeyResults).filteredOn(result -> !result.replayed()).hasSize(1);
+        assertThat(sameKeyResults).filteredOn(MoneyMovementResult::replayed).hasSize(11);
+        assertThat(walletService.getBalance(sameKeyPlayerId).balance()).isEqualTo(100);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id = ?",
+                Long.class,
+                sameKeyDebit.transactionId()
+        )).isEqualTo(1L);
+
+        UUID distinctKeyPlayerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                distinctKeyPlayerId,
+                new MoneyMovementCommand(
+                        100,
+                        "Initial balance",
+                        "postgres-refund-initial-2",
+                        "postgres-refund-credit-2"
+                )
+        );
+        MoneyMovementResult distinctKeyDebit = walletService.debit(
+                distinctKeyPlayerId,
+                new MoneyMovementCommand(
+                        25,
+                        "Purchase",
+                        "postgres-refund-debit-2",
+                        "postgres-refund-debit-key-2"
+                )
+        );
+        record RefundOutcome(boolean successful, WalletErrorCode errorCode) {
+        }
+
+        List<RefundOutcome> distinctKeyResults = runConcurrently(12, index -> {
+            try {
+                walletService.refund(
+                        distinctKeyPlayerId,
+                        distinctKeyDebit.transactionId(),
+                        new RefundCommand(
+                                "Concurrent refund",
+                                "postgres-distinct-refund-" + index,
+                                "postgres-distinct-refund-key-" + index
+                        )
+                );
+                return new RefundOutcome(true, null);
+            } catch (WalletException exception) {
+                return new RefundOutcome(false, exception.getCode());
+            }
+        });
+
+        assertThat(distinctKeyResults).filteredOn(RefundOutcome::successful).hasSize(1);
+        assertThat(distinctKeyResults)
+                .filteredOn(outcome -> !outcome.successful())
+                .extracting(RefundOutcome::errorCode)
+                .containsOnly(WalletErrorCode.DEBIT_ALREADY_REFUNDED)
+                .hasSize(11);
+        assertThat(walletService.getBalance(distinctKeyPlayerId).balance()).isEqualTo(100);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id = ?",
+                Long.class,
+                distinctKeyDebit.transactionId()
+        )).isEqualTo(1L);
+        assertThat(walletService.reconcile(distinctKeyPlayerId).consistent()).isTrue();
+    }
+
+    @Test
+    void postgresMigrationEnforcesOneLinkedCreditPerDebit() {
+        UUID playerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                playerId,
+                new MoneyMovementCommand(
+                        20,
+                        "Initial balance",
+                        "postgres-constraint-initial",
+                        "postgres-constraint-credit"
+                )
+        );
+        MoneyMovementResult debit = walletService.debit(
+                playerId,
+                new MoneyMovementCommand(
+                        10,
+                        "Purchase",
+                        "postgres-constraint-debit",
+                        "postgres-constraint-debit-key"
+                )
+        );
+        walletService.refund(
+                playerId,
+                debit.transactionId(),
+                new RefundCommand(
+                        "Refund",
+                        "postgres-constraint-refund",
+                        "postgres-constraint-refund-key"
+                )
+        );
+
+        Long walletId = jdbcTemplate.queryForObject(
+                "SELECT id FROM wallets WHERE player_id = ?",
+                Long.class,
+                playerId
+        );
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> jdbcTemplate.update("""
+                INSERT INTO ledger_entries (
+                    id, wallet_id, transaction_type, amount, balance_after,
+                    reason, reference_id, idempotency_key, refunded_debit_id, created_at
+                ) VALUES (?, ?, 'CREDIT', 10, 20, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                UUID.randomUUID(),
+                walletId,
+                "Duplicate refund",
+                "postgres-duplicate-refund",
+                "postgres-duplicate-refund-key",
+                debit.transactionId()
+        )).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id = ?",
+                Long.class,
+                debit.transactionId()
+        )).isEqualTo(1L);
+    }
+
     private static <T> List<T> runConcurrently(
             int taskCount,
             IndexedOperation<T> operation

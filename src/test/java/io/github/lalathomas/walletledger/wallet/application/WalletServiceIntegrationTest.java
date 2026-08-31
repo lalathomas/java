@@ -301,6 +301,291 @@ class WalletServiceIntegrationTest {
         assertThat(walletService.getHistory(playerId, 0, 20).totalElements()).isEqualTo(1);
     }
 
+    @Test
+    void refundsDebitInFullAndReplaysOnlyTheExactRefundRequest() {
+        UUID playerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                playerId,
+                command(100, "Initial balance", "initial-refund", "refund-credit")
+        );
+        MoneyMovementResult debit = walletService.debit(
+                playerId,
+                command(40, "Purchase", "purchase-refund", "refund-debit")
+        );
+        RefundCommand request = refundCommand(
+                "Customer refund",
+                "refund-case-1",
+                "refund-request-1"
+        );
+
+        MoneyMovementResult refund = walletService.refund(playerId, debit.transactionId(), request);
+        MoneyMovementResult replay = walletService.refund(playerId, debit.transactionId(), request);
+
+        assertThat(refund.type()).isEqualTo(TransactionType.CREDIT);
+        assertThat(refund.amount()).isEqualTo(40);
+        assertThat(refund.balanceAfter()).isEqualTo(100);
+        assertThat(refund.refundedDebitId()).isEqualTo(debit.transactionId());
+        assertThat(refund.replayed()).isFalse();
+        assertThat(replay.transactionId()).isEqualTo(refund.transactionId());
+        assertThat(replay.replayed()).isTrue();
+        assertThat(walletService.getBalance(playerId).balance()).isEqualTo(100);
+
+        TransactionHistory history = walletService.getHistory(playerId, 0, 20);
+        assertThat(history.totalElements()).isEqualTo(3);
+        assertThat(history.transactions().get(0).refundedDebitId())
+                .isEqualTo(debit.transactionId());
+
+        ReconciliationResult reconciliation = walletService.reconcile(playerId);
+        assertThat(reconciliation.storedBalance()).isEqualTo(100);
+        assertThat(reconciliation.calculatedBalance()).isEqualTo(java.math.BigInteger.valueOf(100));
+        assertThat(reconciliation.transactionCount()).isEqualTo(3);
+        assertThat(reconciliation.consistent()).isTrue();
+    }
+
+    @Test
+    void refundIdempotencyIncludesTargetAndPreventsASecondKeyForSameDebit() {
+        UUID playerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                playerId,
+                command(100, "Initial balance", "refund-idempotency", "refund-idem-credit")
+        );
+        MoneyMovementResult firstDebit = walletService.debit(
+                playerId,
+                command(10, "First purchase", "purchase-first", "refund-idem-debit-1")
+        );
+        MoneyMovementResult secondDebit = walletService.debit(
+                playerId,
+                command(20, "Second purchase", "purchase-second", "refund-idem-debit-2")
+        );
+        RefundCommand firstRefund = refundCommand(
+                "Refund approved",
+                "refund-approved",
+                "shared-refund-key"
+        );
+        walletService.refund(playerId, firstDebit.transactionId(), firstRefund);
+
+        assertWalletError(
+                WalletErrorCode.IDEMPOTENCY_CONFLICT,
+                () -> walletService.refund(
+                        playerId,
+                        secondDebit.transactionId(),
+                        firstRefund
+                )
+        );
+        assertWalletError(
+                WalletErrorCode.IDEMPOTENCY_CONFLICT,
+                () -> walletService.refund(
+                        playerId,
+                        firstDebit.transactionId(),
+                        refundCommand("Changed reason", "refund-approved", "shared-refund-key")
+                )
+        );
+        assertWalletError(
+                WalletErrorCode.DEBIT_ALREADY_REFUNDED,
+                () -> walletService.refund(
+                        playerId,
+                        firstDebit.transactionId(),
+                        refundCommand("Refund approved", "refund-approved", "new-refund-key")
+                )
+        );
+
+        assertThat(walletService.getBalance(playerId).balance()).isEqualTo(80);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id IS NOT NULL",
+                Long.class
+        )).isEqualTo(1L);
+    }
+
+    @Test
+    void refundRejectsUnknownWrongWalletAndCreditTransactionsWithoutLeakingOwnership() {
+        UUID ownerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        MoneyMovementResult credit = walletService.credit(
+                ownerId,
+                command(50, "Initial balance", "refund-target-credit", "target-credit")
+        );
+        MoneyMovementResult debit = walletService.debit(
+                ownerId,
+                command(10, "Purchase", "refund-target-debit", "target-debit")
+        );
+        UUID otherPlayerId = walletService.createWallet(UUID.randomUUID()).playerId();
+
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_NOT_FOUND,
+                () -> walletService.refund(
+                        ownerId,
+                        UUID.randomUUID(),
+                        refundCommand("Refund", "missing", "missing-target")
+                )
+        );
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_NOT_FOUND,
+                () -> walletService.refund(
+                        otherPlayerId,
+                        debit.transactionId(),
+                        refundCommand("Refund", "wrong-wallet", "wrong-wallet-target")
+                )
+        );
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_NOT_REFUNDABLE,
+                () -> walletService.refund(
+                        ownerId,
+                        credit.transactionId(),
+                        refundCommand("Refund", "credit-target", "credit-target-key")
+                )
+        );
+
+        assertThat(walletService.getBalance(ownerId).balance()).isEqualTo(40);
+        assertThat(walletService.getBalance(otherPlayerId).balance()).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id IS NOT NULL",
+                Long.class
+        )).isZero();
+    }
+
+    @Test
+    void refundOverflowRollsBackBalanceLedgerAndIdempotencyState() {
+        UUID playerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                playerId,
+                command(Long.MAX_VALUE, "Maximum balance", "refund-overflow-max", "overflow-max")
+        );
+        MoneyMovementResult debit = walletService.debit(
+                playerId,
+                command(1, "Temporary debit", "refund-overflow-debit", "overflow-debit")
+        );
+        walletService.credit(
+                playerId,
+                command(1, "Restore maximum", "refund-overflow-restore", "overflow-restore")
+        );
+
+        assertWalletError(
+                WalletErrorCode.BALANCE_OVERFLOW,
+                () -> walletService.refund(
+                        playerId,
+                        debit.transactionId(),
+                        refundCommand("Would overflow", "overflow-refund", "overflow-refund-key")
+                )
+        );
+
+        assertThat(walletService.getBalance(playerId).balance()).isEqualTo(Long.MAX_VALUE);
+        assertThat(walletService.getHistory(playerId, 0, 20).totalElements()).isEqualTo(3);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id IS NOT NULL",
+                Long.class
+        )).isZero();
+    }
+
+    @Test
+    void reconciliationUsesExactSignedNumericAggregateAndNeverRepairsMismatch() {
+        UUID emptyPlayerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        ReconciliationResult empty = walletService.reconcile(emptyPlayerId);
+        assertThat(empty.storedBalance()).isZero();
+        assertThat(empty.calculatedBalance()).isEqualTo(java.math.BigInteger.ZERO);
+        assertThat(empty.transactionCount()).isZero();
+        assertThat(empty.consistent()).isTrue();
+        assertThat(empty.checkedAt()).isNotNull();
+
+        UUID turnoverPlayerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        walletService.credit(
+                turnoverPlayerId,
+                command(Long.MAX_VALUE, "Cycle one credit", "cycle-credit-1", "cycle-credit-key-1")
+        );
+        walletService.debit(
+                turnoverPlayerId,
+                command(Long.MAX_VALUE, "Cycle one debit", "cycle-debit-1", "cycle-debit-key-1")
+        );
+        walletService.credit(
+                turnoverPlayerId,
+                command(Long.MAX_VALUE, "Cycle two credit", "cycle-credit-2", "cycle-credit-key-2")
+        );
+        walletService.debit(
+                turnoverPlayerId,
+                command(Long.MAX_VALUE, "Cycle two debit", "cycle-debit-2", "cycle-debit-key-2")
+        );
+
+        ReconciliationResult exact = walletService.reconcile(turnoverPlayerId);
+        assertThat(exact.storedBalance()).isZero();
+        assertThat(exact.calculatedBalance()).isEqualTo(java.math.BigInteger.ZERO);
+        assertThat(exact.transactionCount()).isEqualTo(4);
+        assertThat(exact.consistent()).isTrue();
+
+        jdbcTemplate.update(
+                "UPDATE wallets SET balance = 1 WHERE player_id = ?",
+                turnoverPlayerId
+        );
+        ReconciliationResult mismatch = walletService.reconcile(turnoverPlayerId);
+        assertThat(mismatch.storedBalance()).isEqualTo(1);
+        assertThat(mismatch.calculatedBalance()).isEqualTo(java.math.BigInteger.ZERO);
+        assertThat(mismatch.consistent()).isFalse();
+        assertThat(walletService.getBalance(turnoverPlayerId).balance()).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentRefundsApplyOneCreditForSameAndDistinctKeys() throws Exception {
+        UUID sameKeyPlayerId = createWalletWithBalance(100);
+        MoneyMovementResult sameKeyDebit = walletService.debit(
+                sameKeyPlayerId,
+                command(30, "Purchase", "same-key-debit", "same-key-debit-request")
+        );
+        RefundCommand sameRequest = refundCommand(
+                "Concurrent refund",
+                "same-key-refund",
+                "one-refund-idempotency-key"
+        );
+
+        List<MoneyMovementResult> sameKeyResults = runConcurrently(
+                12,
+                ignored -> walletService.refund(
+                        sameKeyPlayerId,
+                        sameKeyDebit.transactionId(),
+                        sameRequest
+                )
+        );
+        assertThat(sameKeyResults)
+                .extracting(MoneyMovementResult::transactionId)
+                .containsOnly(sameKeyResults.get(0).transactionId());
+        assertThat(sameKeyResults).filteredOn(result -> !result.replayed()).hasSize(1);
+        assertThat(sameKeyResults).filteredOn(MoneyMovementResult::replayed).hasSize(11);
+        assertThat(walletService.getBalance(sameKeyPlayerId).balance()).isEqualTo(100);
+
+        UUID distinctKeyPlayerId = createWalletWithBalance(100);
+        MoneyMovementResult distinctKeyDebit = walletService.debit(
+                distinctKeyPlayerId,
+                command(25, "Purchase", "distinct-key-debit", "distinct-key-debit-request")
+        );
+        record RefundOutcome(boolean successful, WalletErrorCode errorCode) {
+        }
+        List<RefundOutcome> distinctKeyResults = runConcurrently(12, index -> {
+            try {
+                walletService.refund(
+                        distinctKeyPlayerId,
+                        distinctKeyDebit.transactionId(),
+                        refundCommand(
+                                "Concurrent refund",
+                                "distinct-refund-" + index,
+                                "distinct-refund-key-" + index
+                        )
+                );
+                return new RefundOutcome(true, null);
+            } catch (WalletException exception) {
+                return new RefundOutcome(false, exception.getCode());
+            }
+        });
+
+        assertThat(distinctKeyResults).filteredOn(RefundOutcome::successful).hasSize(1);
+        assertThat(distinctKeyResults)
+                .filteredOn(outcome -> !outcome.successful())
+                .extracting(RefundOutcome::errorCode)
+                .containsOnly(WalletErrorCode.DEBIT_ALREADY_REFUNDED)
+                .hasSize(11);
+        assertThat(walletService.getBalance(distinctKeyPlayerId).balance()).isEqualTo(100);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE refunded_debit_id = ?",
+                Long.class,
+                distinctKeyDebit.transactionId()
+        )).isEqualTo(1L);
+    }
+
     private UUID createWalletWithBalance(long balance) {
         UUID playerId = walletService.createWallet(UUID.randomUUID()).playerId();
         walletService.credit(
@@ -317,6 +602,14 @@ class WalletServiceIntegrationTest {
             String idempotencyKey
     ) {
         return new MoneyMovementCommand(amount, reason, referenceId, idempotencyKey);
+    }
+
+    private static RefundCommand refundCommand(
+            String reason,
+            String referenceId,
+            String idempotencyKey
+    ) {
+        return new RefundCommand(reason, referenceId, idempotencyKey);
     }
 
     private static void assertWalletError(WalletErrorCode expectedCode, Runnable action) {

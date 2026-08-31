@@ -21,4 +21,26 @@ public interface WalletRepository extends Repository<Wallet, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select wallet from Wallet wallet where wallet.playerId = :playerId")
     Optional<Wallet> findByPlayerIdForUpdate(@Param("playerId") UUID playerId);
+
+    @Query(value = """
+            select w.balance as "storedBalance",
+                   coalesce(
+                       sum(
+                           case
+                               when le.transaction_type = 'CREDIT'
+                                   then cast(le.amount as numeric(38, 0))
+                               else -cast(le.amount as numeric(38, 0))
+                           end
+                       ),
+                       cast(0 as numeric(38, 0))
+                   ) as "calculatedBalance",
+                   count(le.id) as "transactionCount"
+            from wallets w
+            left join ledger_entries le on le.wallet_id = w.id
+            where w.player_id = :playerId
+            group by w.id, w.balance
+            """, nativeQuery = true)
+    Optional<WalletReconciliationProjection> reconcileByPlayerId(
+            @Param("playerId") UUID playerId
+    );
 }

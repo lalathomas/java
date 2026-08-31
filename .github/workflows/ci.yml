@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository
@@ -27,24 +27,56 @@ jobs:
       - name: Compile, test, and package
         run: mvn --batch-mode --no-transfer-progress clean verify
 
-      - name: Require the PostgreSQL concurrency test
+      - name: Require PostgreSQL integration coverage
         run: |
           python - <<'PY'
           from pathlib import Path
           from xml.etree import ElementTree
 
-          report = Path("target/surefire-reports/TEST-io.github.lalathomas.walletledger.wallet.application.PostgresWalletConcurrencyIntegrationTest.xml")
-          if not report.exists():
-              raise SystemExit(f"Required PostgreSQL test report is missing: {report}")
+          required_suites = {
+              Path("target/surefire-reports/TEST-io.github.lalathomas.walletledger.wallet.application.PostgresWalletConcurrencyIntegrationTest.xml"): 3,
+              Path("target/surefire-reports/TEST-io.github.lalathomas.walletledger.wallet.application.PostgresV1ToV2MigrationIntegrationTest.xml"): 1,
+          }
 
-          suite = ElementTree.parse(report).getroot()
-          skipped = int(suite.attrib.get("skipped", "0"))
-          failures = int(suite.attrib.get("failures", "0"))
-          errors = int(suite.attrib.get("errors", "0"))
-          tests = int(suite.attrib.get("tests", "0"))
-          if tests != 1 or skipped != 0 or failures != 0 or errors != 0:
-              raise SystemExit(
-                  "PostgreSQL concurrency verification must run and pass "
-                  f"(tests={tests}, skipped={skipped}, failures={failures}, errors={errors})"
-              )
+          for report, minimum_tests in required_suites.items():
+              if not report.exists():
+                  raise SystemExit(f"Required PostgreSQL test report is missing: {report}")
+
+              suite = ElementTree.parse(report).getroot()
+              skipped = int(suite.attrib.get("skipped", "0"))
+              failures = int(suite.attrib.get("failures", "0"))
+              errors = int(suite.attrib.get("errors", "0"))
+              tests = int(suite.attrib.get("tests", "0"))
+              if tests < minimum_tests or skipped != 0 or failures != 0 or errors != 0:
+                  raise SystemExit(
+                      "PostgreSQL integration verification must run and pass "
+                      f"for {report.name} (tests={tests}, required={minimum_tests}, "
+                      f"skipped={skipped}, failures={failures}, errors={errors})"
+                  )
           PY
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build application container
+        run: docker compose build app
+
+      - name: Smoke-test container readiness
+        run: |
+          docker compose up --detach --no-build
+          for attempt in {1..60}; do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:8080/actuator/health/readiness \
+              > /tmp/wallet-health.json; then
+              cat /tmp/wallet-health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs app
+          exit 1
+
+      - name: Stop smoke-test containers
+        if: always()
+        run: docker compose down --volumes --remove-orphans

@@ -30,7 +30,41 @@ public final class WalletException extends RuntimeException {
         );
     }
 
-    public static WalletException insufficientFunds(UUID playerId, long requestedAmount, long availableBalance) {
+    public static WalletException transactionNotFound(UUID playerId, UUID transactionId) {
+        return new WalletException(
+                WalletErrorCode.TRANSACTION_NOT_FOUND,
+                "Transaction was not found for this wallet",
+                Map.of(
+                        "playerId", playerId.toString(),
+                        "transactionId", transactionId.toString()
+                )
+        );
+    }
+
+    public static WalletException transactionNotRefundable(UUID transactionId) {
+        return new WalletException(
+                WalletErrorCode.TRANSACTION_NOT_REFUNDABLE,
+                "Only debit transactions can be refunded",
+                Map.of("transactionId", transactionId.toString())
+        );
+    }
+
+    public static WalletException debitAlreadyRefunded(UUID playerId, UUID debitTransactionId) {
+        return new WalletException(
+                WalletErrorCode.DEBIT_ALREADY_REFUNDED,
+                "The debit transaction has already been refunded",
+                Map.of(
+                        "playerId", playerId.toString(),
+                        "debitTransactionId", debitTransactionId.toString()
+                )
+        );
+    }
+
+    public static WalletException insufficientFunds(
+            UUID playerId,
+            long requestedAmount,
+            long availableBalance
+    ) {
         return new WalletException(
                 WalletErrorCode.INSUFFICIENT_FUNDS,
                 "The wallet does not have enough funds for this debit",

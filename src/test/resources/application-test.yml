@@ -16,3 +16,10 @@ spring:
 logging:
   level:
     io.github.lalathomas.walletledger: WARN
+
+management:
+  endpoint:
+    health:
+      group:
+        readiness:
+          show-components: always
