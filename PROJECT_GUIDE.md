@@ -133,7 +133,16 @@ There are three main tables:
 ```text
 wallets
   player_id
-  balance            <- current snapshot
+  balance              <- posted balance snapshot
+  reserved_balance     <- amount currently held
+
+fund_reservations
+  wallet_id
+  amount
+  status               <- ACTIVE, CAPTURED, or RELEASED
+  reason
+  reference_id
+  completed_at
 
 ledger_entries
   transaction_type
@@ -143,7 +152,9 @@ ledger_entries
   reference_id
   idempotency_key
   reversal_of_entry_id
-  created_at          <- permanent history
+  transfer_id
+  reservation_id
+  created_at            <- permanent history
 ```
 
 The balance gives fast reads. Without it, every balance request would have to add all credits and subtract all debits. The ledger gives an audit trail and lets the service replay completed requests.
