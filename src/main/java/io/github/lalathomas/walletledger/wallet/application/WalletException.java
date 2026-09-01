@@ -1,5 +1,7 @@
 package io.github.lalathomas.walletledger.wallet.application;
 
+import io.github.lalathomas.walletledger.wallet.domain.TransactionType;
+
 import java.util.Map;
 import java.util.UUID;
 
@@ -27,6 +29,45 @@ public final class WalletException extends RuntimeException {
                 WalletErrorCode.WALLET_ALREADY_EXISTS,
                 "A wallet already exists for player " + playerId,
                 Map.of("playerId", playerId.toString())
+        );
+    }
+
+    public static WalletException transactionNotFound(UUID playerId, UUID transactionId) {
+        return new WalletException(
+                WalletErrorCode.TRANSACTION_NOT_FOUND,
+                "The transaction was not found in this wallet",
+                Map.of(
+                        "playerId", playerId.toString(),
+                        "transactionId", transactionId.toString()
+                )
+        );
+    }
+
+    public static WalletException transactionNotRefundable(
+            UUID transactionId,
+            TransactionType transactionType
+    ) {
+        return new WalletException(
+                WalletErrorCode.TRANSACTION_NOT_REFUNDABLE,
+                "Only debit transactions can be refunded",
+                Map.of(
+                        "transactionId", transactionId.toString(),
+                        "transactionType", transactionType.name()
+                )
+        );
+    }
+
+    public static WalletException transactionAlreadyRefunded(
+            UUID transactionId,
+            UUID refundTransactionId
+    ) {
+        return new WalletException(
+                WalletErrorCode.TRANSACTION_ALREADY_REFUNDED,
+                "The debit transaction has already been refunded",
+                Map.of(
+                        "transactionId", transactionId.toString(),
+                        "refundTransactionId", refundTransactionId.toString()
+                )
         );
     }
 

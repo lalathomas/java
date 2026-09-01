@@ -23,10 +23,16 @@ import java.util.UUID;
 @Immutable
 @Table(
         name = "ledger_entries",
-        uniqueConstraints = @UniqueConstraint(
-                name = "uk_ledger_wallet_idempotency",
-                columnNames = {"wallet_id", "idempotency_key"}
-        )
+        uniqueConstraints = {
+                @UniqueConstraint(
+                        name = "uk_ledger_wallet_idempotency",
+                        columnNames = {"wallet_id", "idempotency_key"}
+                ),
+                @UniqueConstraint(
+                        name = "uk_ledger_refund_source",
+                        columnNames = "reversal_of_entry_id"
+                )
+        }
 )
 public class LedgerEntry {
 
@@ -57,6 +63,9 @@ public class LedgerEntry {
     @Column(name = "idempotency_key", nullable = false, updatable = false, length = 100)
     private String idempotencyKey;
 
+    @Column(name = "reversal_of_entry_id", updatable = false)
+    private UUID reversalOfEntryId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -73,6 +82,19 @@ public class LedgerEntry {
             String referenceId,
             String idempotencyKey
     ) {
+        this(wallet, type, amount, balanceAfter, reason, referenceId, idempotencyKey, null);
+    }
+
+    private LedgerEntry(
+            Wallet wallet,
+            TransactionType type,
+            long amount,
+            long balanceAfter,
+            String reason,
+            String referenceId,
+            String idempotencyKey,
+            UUID reversalOfEntryId
+    ) {
         this.wallet = Objects.requireNonNull(wallet, "wallet must not be null");
         this.type = Objects.requireNonNull(type, "type must not be null");
         this.amount = amount;
@@ -80,6 +102,33 @@ public class LedgerEntry {
         this.reason = Objects.requireNonNull(reason, "reason must not be null");
         this.referenceId = Objects.requireNonNull(referenceId, "referenceId must not be null");
         this.idempotencyKey = Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
+        this.reversalOfEntryId = reversalOfEntryId;
+        if ((type == TransactionType.REFUND) != (reversalOfEntryId != null)) {
+            throw new IllegalArgumentException(
+                    "Only refund entries must identify the transaction they reverse"
+            );
+        }
+    }
+
+    public static LedgerEntry refund(
+            Wallet wallet,
+            long amount,
+            long balanceAfter,
+            String reason,
+            String referenceId,
+            String idempotencyKey,
+            UUID reversalOfEntryId
+    ) {
+        return new LedgerEntry(
+                wallet,
+                TransactionType.REFUND,
+                amount,
+                balanceAfter,
+                reason,
+                referenceId,
+                idempotencyKey,
+                Objects.requireNonNull(reversalOfEntryId, "reversalOfEntryId must not be null")
+        );
     }
 
     @PrePersist
@@ -95,6 +144,17 @@ public class LedgerEntry {
     ) {
         return this.type == requestedType
                 && this.amount == requestedAmount
+                && this.reason.equals(requestedReason)
+                && this.referenceId.equals(requestedReferenceId);
+    }
+
+    public boolean representsRefund(
+            UUID requestedTransactionId,
+            String requestedReason,
+            String requestedReferenceId
+    ) {
+        return this.type == TransactionType.REFUND
+                && Objects.equals(this.reversalOfEntryId, requestedTransactionId)
                 && this.reason.equals(requestedReason)
                 && this.referenceId.equals(requestedReferenceId);
     }
@@ -129,6 +189,10 @@ public class LedgerEntry {
 
     public String getIdempotencyKey() {
         return idempotencyKey;
+    }
+
+    public UUID getReversalOfEntryId() {
+        return reversalOfEntryId;
     }
 
     public Instant getCreatedAt() {

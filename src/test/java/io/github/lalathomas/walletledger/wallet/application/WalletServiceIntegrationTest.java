@@ -301,6 +301,145 @@ class WalletServiceIntegrationTest {
         assertThat(walletService.getHistory(playerId, 0, 20).totalElements()).isEqualTo(1);
     }
 
+    @Test
+    void concurrentWalletCreationCreatesExactlyOneWallet() throws Exception {
+        UUID playerId = UUID.randomUUID();
+        int requestCount = 20;
+
+        List<String> outcomes = runConcurrently(requestCount, ignored -> {
+            try {
+                walletService.createWallet(playerId);
+                return "CREATED";
+            } catch (WalletException exception) {
+                return exception.getCode().name();
+            }
+        });
+
+        assertThat(outcomes).filteredOn("CREATED"::equals).hasSize(1);
+        assertThat(outcomes)
+                .filteredOn(WalletErrorCode.WALLET_ALREADY_EXISTS.name()::equals)
+                .hasSize(requestCount - 1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM wallets WHERE player_id = ?",
+                Long.class,
+                playerId
+        )).isEqualTo(1L);
+    }
+
+    @Test
+    void refundsOriginalDebitExactlyOnceAndReplaysTheSameRequest() {
+        UUID playerId = createWalletWithBalance(100);
+        MoneyMovementResult debit = walletService.debit(
+                playerId,
+                command(40, "Shop purchase", "purchase-40", "purchase-40-debit")
+        );
+        RefundCommand request = new RefundCommand(
+                "Purchase cancelled",
+                "support-ticket-40",
+                "purchase-40-refund"
+        );
+
+        MoneyMovementResult refund = walletService.refund(playerId, debit.transactionId(), request);
+        MoneyMovementResult replay = walletService.refund(playerId, debit.transactionId(), request);
+
+        assertThat(refund.type()).isEqualTo(TransactionType.REFUND);
+        assertThat(refund.amount()).isEqualTo(40);
+        assertThat(refund.balanceAfter()).isEqualTo(100);
+        assertThat(refund.reversalOfTransactionId()).isEqualTo(debit.transactionId());
+        assertThat(refund.replayed()).isFalse();
+        assertThat(replay.transactionId()).isEqualTo(refund.transactionId());
+        assertThat(replay.replayed()).isTrue();
+        assertThat(walletService.getBalance(playerId).balance()).isEqualTo(100);
+
+        TransactionHistory history = walletService.getHistory(playerId, 0, 20);
+        assertThat(history.totalElements()).isEqualTo(3);
+        assertThat(history.transactions())
+                .filteredOn(entry -> entry.type() == TransactionType.REFUND)
+                .singleElement()
+                .satisfies(entry ->
+                        assertThat(entry.reversalOfTransactionId()).isEqualTo(debit.transactionId())
+                );
+
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_ALREADY_REFUNDED,
+                () -> walletService.refund(
+                        playerId,
+                        debit.transactionId(),
+                        new RefundCommand("Another attempt", "ticket-41", "another-refund-key")
+                )
+        );
+        assertWalletError(
+                WalletErrorCode.IDEMPOTENCY_CONFLICT,
+                () -> walletService.refund(
+                        playerId,
+                        debit.transactionId(),
+                        new RefundCommand("Changed reason", "support-ticket-40", "purchase-40-refund")
+                )
+        );
+    }
+
+    @Test
+    void rejectsMissingCrossWalletAndNonDebitRefundSources() {
+        UUID firstPlayerId = createWalletWithBalance(50);
+        UUID secondPlayerId = walletService.createWallet(UUID.randomUUID()).playerId();
+        UUID creditTransactionId = walletService.getHistory(firstPlayerId, 0, 20)
+                .transactions()
+                .stream()
+                .findFirst()
+                .orElseThrow()
+                .transactionId();
+        RefundCommand request = new RefundCommand("Invalid refund", "ticket-invalid", "refund-invalid");
+
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_NOT_REFUNDABLE,
+                () -> walletService.refund(firstPlayerId, creditTransactionId, request)
+        );
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_NOT_FOUND,
+                () -> walletService.refund(firstPlayerId, UUID.randomUUID(), request)
+        );
+        assertWalletError(
+                WalletErrorCode.TRANSACTION_NOT_FOUND,
+                () -> walletService.refund(secondPlayerId, creditTransactionId, request)
+        );
+    }
+
+    @Test
+    void concurrentRefundAttemptsApplyExactlyOnce() throws Exception {
+        UUID playerId = createWalletWithBalance(100);
+        MoneyMovementResult debit = walletService.debit(
+                playerId,
+                command(35, "Shop purchase", "purchase-concurrent", "concurrent-debit")
+        );
+        int requestCount = 20;
+
+        List<String> outcomes = runConcurrently(requestCount, index -> {
+            try {
+                walletService.refund(
+                        playerId,
+                        debit.transactionId(),
+                        new RefundCommand(
+                                "Concurrent cancellation",
+                                "ticket-" + index,
+                                "concurrent-refund-" + index
+                        )
+                );
+                return "REFUNDED";
+            } catch (WalletException exception) {
+                return exception.getCode().name();
+            }
+        });
+
+        assertThat(outcomes).filteredOn("REFUNDED"::equals).hasSize(1);
+        assertThat(outcomes)
+                .filteredOn(WalletErrorCode.TRANSACTION_ALREADY_REFUNDED.name()::equals)
+                .hasSize(requestCount - 1);
+        assertThat(walletService.getBalance(playerId).balance()).isEqualTo(100);
+        assertThat(walletService.getHistory(playerId, 0, 20).transactions())
+                .filteredOn(entry -> entry.type() == TransactionType.REFUND)
+                .hasSize(1);
+    }
+
     private UUID createWalletWithBalance(long balance) {
         UUID playerId = walletService.createWallet(UUID.randomUUID()).playerId();
         walletService.credit(

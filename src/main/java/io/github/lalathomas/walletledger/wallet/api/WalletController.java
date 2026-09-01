@@ -71,6 +71,21 @@ public class WalletController {
         return movementResponse(result);
     }
 
+    @PostMapping("/{playerId}/transactions/{transactionId}/refund")
+    public ResponseEntity<MoneyMovementResponse> refund(
+            @PathVariable UUID playerId,
+            @PathVariable UUID transactionId,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String idempotencyKey,
+            @Valid @RequestBody RefundRequest request
+    ) {
+        MoneyMovementResult result = walletService.refund(
+                playerId,
+                transactionId,
+                request.toCommand(idempotencyKey)
+        );
+        return movementResponse(result);
+    }
+
     @GetMapping("/{playerId}/balance")
     public BalanceResponse getBalance(@PathVariable UUID playerId) {
         return BalanceResponse.from(walletService.getBalance(playerId));

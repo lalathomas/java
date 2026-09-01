@@ -167,12 +167,13 @@ src/main/java/io/github/lalathomas/walletledger/
 
 | File | Purpose |
 |---|---|
-| `WalletController.java` | Defines create, credit, debit, balance, and history endpoints |
+| `WalletController.java` | Defines create, credit, debit, refund, balance, and history endpoints |
 | `CreateWalletRequest.java` | Validates the player ID when creating a wallet |
 | `MoneyMovementRequest.java` | Validates amount, reason, and reference before creating an application command |
+| `RefundRequest.java` | Validates refund reason/reference; the amount is derived from the original debit |
 | `WalletResponse.java` | Wallet-creation response |
 | `BalanceResponse.java` | Current-balance response |
-| `MoneyMovementResponse.java` | Credit/debit result, including transaction ID and replay status |
+| `MoneyMovementResponse.java` | Credit/debit/refund result, including transaction ID, reversal link, and replay status |
 | `TransactionResponse.java` | One public ledger-history item |
 | `TransactionHistoryResponse.java` | History list plus pagination metadata |
 
@@ -182,8 +183,9 @@ JPA entities are never returned directly from this layer. HTTP DTOs keep databas
 
 | File | Purpose |
 |---|---|
-| `WalletService.java` | Core use cases, transaction boundaries, row locking, validation, idempotency, and mappings |
+| `WalletService.java` | Core use cases, transaction boundaries, row locking, validation, idempotency, refunds, and mappings |
 | `MoneyMovementCommand.java` | Internal normalized credit/debit input |
+| `RefundCommand.java` | Internal normalized refund input |
 | `MoneyMovementResult.java` | Internal result for a successful/replayed mutation |
 | `WalletSnapshot.java` | Internal projection of current wallet state |
 | `LedgerEntryView.java` | Internal history projection |
@@ -198,8 +200,8 @@ JPA entities are never returned directly from this layer. HTTP DTOs keep databas
 | File | Purpose |
 |---|---|
 | `Wallet.java` | Wallet entity, exact `long` arithmetic, and non-negative balance invariant |
-| `LedgerEntry.java` | Immutable successful balance-change record with reason/reference/idempotency data |
-| `TransactionType.java` | `CREDIT` and `DEBIT` enum |
+| `LedgerEntry.java` | Immutable successful balance-change record, including refund-to-debit linkage |
+| `TransactionType.java` | `CREDIT`, `DEBIT`, and `REFUND` enum |
 
 ### 4.5 Persistence layer: `wallet/persistence`
 
@@ -247,6 +249,15 @@ Creates:
 
 Flyway records migration version `1` and prevents accidental schema drift.
 
+### `src/main/resources/db/migration/V2__add_transaction_refunds.sql`
+
+Adds the optional transaction-refund model:
+
+- `REFUND` ledger transaction type
+- immutable `reversal_of_entry_id` link to the original debit
+- unique source constraint preventing double refunds
+- foreign-key and shape checks for linked refund entries
+
 ## 6. Automated tests
 
 ### `WalletServiceIntegrationTest.java`
@@ -264,6 +275,8 @@ Covers normal money paths and pressure cases:
 - concurrent credits
 - concurrent debits
 - concurrent duplicate submissions
+- refund success/replay and refund business-rule failures
+- concurrent distinct-key refund attempts
 
 ### `WalletApiIntegrationTest.java`
 
@@ -276,6 +289,7 @@ Uses MockMvc to verify the real HTTP contract:
 - strict decimal rejection with no balance change
 - domain error details
 - history response
+- refund response linkage, replay, validation, and business errors
 
 ### `WalletTransactionRollbackIntegrationTest.java`
 
@@ -283,21 +297,22 @@ Forces the ledger repository to fail **after** the wallet entity has been change
 
 ### `PostgresWalletConcurrencyIntegrationTest.java`
 
-Runs the highest-risk concurrent debit and duplicate-delivery cases against an actual PostgreSQL container. It skips locally when Docker is stopped, but the GitHub Actions workflow fails if this test is skipped in CI.
+Runs the highest-risk concurrent debit, duplicate-delivery, lock-timeout/retry, distinct-key refund, and same-key duplicate refund cases against an actual PostgreSQL container. It skips locally when Docker is stopped, but the GitHub Actions workflow fails if this test is skipped in CI.
 
-### `src/test/resources/application-test.yml`
+### Test profiles
 
-Overrides the production PostgreSQL datasource with in-memory H2 for portable tests and uses H2-compatible lock-timeout syntax.
+- `src/test/resources/application-test.yml` uses in-memory H2 and H2-compatible lock-timeout syntax for portable tests.
+- `src/test/resources/application-postgres-test.yml` keeps the real PostgreSQL Testcontainer profile separate and uses PostgreSQL lock-timeout syntax.
 
 ## 7. End-to-end request flow
 
-A credit/debit request follows this path:
+A credit, debit, or refund request follows this path:
 
 ```text
 HTTP request
   -> WalletController
   -> request DTO validation
-  -> MoneyMovementCommand
+  -> MoneyMovementCommand or RefundCommand
   -> WalletService @Transactional method
   -> SELECT wallet FOR UPDATE
   -> idempotency lookup after lock
@@ -395,7 +410,7 @@ To understand the project instead of only running it, read in this order:
 1. `README.md`
 2. `PROJECT_GUIDE.md`
 3. `pom.xml`
-4. `src/main/resources/db/migration/V1__create_wallet_ledger.sql`
+4. `src/main/resources/db/migration/` (`V1` then `V2`)
 5. `Wallet.java`
 6. `LedgerEntry.java`
 7. `WalletService.java`

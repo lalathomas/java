@@ -42,9 +42,9 @@ jobs:
           failures = int(suite.attrib.get("failures", "0"))
           errors = int(suite.attrib.get("errors", "0"))
           tests = int(suite.attrib.get("tests", "0"))
-          if tests != 1 or skipped != 0 or failures != 0 or errors != 0:
+          if tests != 3 or skipped != 0 or failures != 0 or errors != 0:
               raise SystemExit(
-                  "PostgreSQL concurrency verification must run and pass "
+                  "All PostgreSQL concurrency and lock-timeout checks must run and pass "
                   f"(tests={tests}, skipped={skipped}, failures={failures}, errors={errors})"
               )
           PY

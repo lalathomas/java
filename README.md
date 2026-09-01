@@ -1,6 +1,6 @@
 # Wallet Ledger Service
 
-A production-minded backend for creating player wallets, crediting and debiting exact currency units, reading current balances, and browsing an append-only transaction history. The design focuses on the failure modes that matter for money movement: duplicate delivery, concurrent requests, insufficient funds, overflow, and atomic persistence.
+A production-minded backend for creating player wallets, crediting and debiting exact currency units, issuing full transaction refunds, reading current balances, and browsing an append-only transaction history. The design focuses on the failure modes that matter for money movement: duplicate delivery, concurrent requests, insufficient funds, overflow, double refunds, and atomic persistence.
 
 ## Contents
 
@@ -20,6 +20,8 @@ A production-minded backend for creating player wallets, crediting and debiting 
 
 - Explicit wallet creation for a UUID player ID
 - Exact integer credits and debits
+- Full refund of an original debit, with immutable source-transaction linkage
+- One-refund-only enforcement under concurrent requests
 - Insufficient-funds rejection without partial state changes
 - Current-balance lookup
 - Paginated, newest-first transaction history
@@ -36,7 +38,7 @@ A production-minded backend for creating player wallets, crediting and debiting 
 - H2-backed integration/API tests that run without Docker
 - A PostgreSQL Testcontainers concurrency test that runs when Docker is available
 
-Optional product features such as transfers, reservations, refunds, streaks, and bulk rewards were intentionally not added. A small, correct money core is more valuable here than several incomplete extensions.
+The optional refund feature is intentionally narrow: it supports a full, one-time reversal of an existing debit. Transfers, reservations, streaks, promotions, and bulk rewards remain outside this service's scope so the money core stays reviewable and complete.
 
 ## Technology
 
@@ -162,6 +164,7 @@ Amounts are positive JSON integers representing whole in-game currency units. Fl
 | `POST` | `/api/v1/wallets` | Create a zero-balance wallet | `201 Created` |
 | `POST` | `/api/v1/wallets/{playerId}/credits` | Credit a wallet | `200 OK` |
 | `POST` | `/api/v1/wallets/{playerId}/debits` | Debit a wallet | `200 OK` |
+| `POST` | `/api/v1/wallets/{playerId}/transactions/{transactionId}/refund` | Fully refund one debit | `200 OK` |
 | `GET` | `/api/v1/wallets/{playerId}/balance` | Read current balance | `200 OK` |
 | `GET` | `/api/v1/wallets/{playerId}/transactions?page=0&size=20` | Read ledger history | `200 OK` |
 
@@ -216,6 +219,21 @@ Invoke-RestMethod `
   } | ConvertTo-Json)
 ```
 
+Refund the debit using its returned `transactionId` (the server derives the refund amount from that debit):
+
+```powershell
+$debitTransactionId = "replace-with-debit-transaction-id"
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$baseUrl/$playerId/transactions/$debitTransactionId/refund" `
+  -Headers @{ "Idempotency-Key" = "purchase-91-refund-v1" } `
+  -ContentType "application/json" `
+  -Body (@{
+    reason = "Purchase cancelled"
+    referenceId = "support-ticket-203"
+  } | ConvertTo-Json)
+```
+
 Read the balance and first history page:
 
 ```powershell
@@ -223,7 +241,7 @@ Invoke-RestMethod -Method Get -Uri "$baseUrl/$playerId/balance"
 Invoke-RestMethod -Method Get -Uri "$baseUrl/$playerId/transactions?page=0&size=20"
 ```
 
-### Credit/debit request
+### Credit/debit requests
 
 Credit and debit requests require an `Idempotency-Key` header and this body:
 
@@ -237,6 +255,19 @@ Credit and debit requests require an `Idempotency-Key` header and this body:
 
 The key must be 1–100 characters, begin with an alphanumeric character, and otherwise contain only letters, digits, `.`, `_`, `:`, or `-`.
 
+### Refund request
+
+A refund requires the original debit transaction ID in the path, an `Idempotency-Key` header, and audit metadata:
+
+```json
+{
+  "reason": "Purchase cancelled",
+  "referenceId": "support-ticket-203"
+}
+```
+
+The client cannot provide an amount. The service refunds the exact amount of the linked debit, only permits one refund for that debit, and records a `REFUND` entry whose `reversalOfTransactionId` points to the original transaction. Repeating the same refund request with the same key replays the durable result; another key receives `409 TRANSACTION_ALREADY_REFUNDED`.
+
 A successful mutation returns the durable transaction identity and the balance immediately after that transaction:
 
 ```json
@@ -249,6 +280,7 @@ A successful mutation returns the durable transaction identity and the balance i
   "reason": "Mission reward",
   "referenceId": "mission-42",
   "idempotencyKey": "mission-42-credit-v1",
+  "reversalOfTransactionId": null,
   "createdAt": "2026-08-31T02:00:00Z",
   "replayed": false
 }
@@ -269,6 +301,7 @@ The response header `Idempotent-Replayed` is `false` for the first successful ap
       "balanceAfter": 100,
       "reason": "Mission reward",
       "referenceId": "mission-42",
+      "reversalOfTransactionId": null,
       "createdAt": "2026-08-31T02:00:00Z"
     }
   ],
@@ -285,7 +318,7 @@ The response header `Idempotent-Replayed` is `false` for the first successful ap
 
 ### Errors
 
-Errors use a consistent structure. An insufficient debit returns `422 Unprocessable Entity` and does not alter either table:
+Errors use a consistent JSON structure. Framework errors are returned as `application/json` even when the requested success representation is unavailable. An insufficient debit returns `422 Unprocessable Entity` and does not alter either table:
 
 ```json
 {
@@ -313,9 +346,16 @@ Important statuses and codes:
 | `400` | `MISSING_REQUEST_VALUE` | Required header or request value missing |
 | `400` | `INVALID_PARAMETER` | Invalid path/query type, such as a malformed UUID |
 | `400` | `INVALID_AMOUNT` / `INVALID_REQUEST` | Service-level business input validation failed |
+| `404` | `RESOURCE_NOT_FOUND` | No route or static resource matches the request |
+| `405` | `METHOD_NOT_ALLOWED` | The route does not support the requested HTTP method |
+| `406` | `NOT_ACCEPTABLE` | The requested response media type is unsupported |
+| `415` | `UNSUPPORTED_MEDIA_TYPE` | The request body media type is unsupported |
 | `404` | `WALLET_NOT_FOUND` | No wallet exists for the player |
+| `404` | `TRANSACTION_NOT_FOUND` | The refund source does not exist in this wallet |
 | `409` | `WALLET_ALREADY_EXISTS` | The player already has a wallet |
 | `409` | `IDEMPOTENCY_CONFLICT` | The key belongs to a different request payload |
+| `409` | `TRANSACTION_ALREADY_REFUNDED` | Another refund already reversed this debit |
+| `422` | `TRANSACTION_NOT_REFUNDABLE` | The source is not a debit transaction |
 | `422` | `INSUFFICIENT_FUNDS` | Debit exceeds the locked current balance |
 | `422` | `BALANCE_OVERFLOW` | Credit would exceed `Long.MAX_VALUE` |
 | `503` | `WALLET_BUSY` | Database lock acquisition failed; retry safely with the same key |
@@ -346,9 +386,10 @@ Flyway creates constraints for:
 - unique player wallets;
 - non-negative wallet and resulting balances;
 - positive ledger amounts;
-- `CREDIT` or `DEBIT` transaction types;
+- `CREDIT`, `DEBIT`, or `REFUND` transaction types;
 - nonblank reason, reference, and idempotency values;
 - unique `(wallet_id, idempotency_key)` pairs;
+- a unique refund-source foreign key, preventing a debit from being refunded twice;
 - restricted wallet deletion when ledger rows exist.
 
 Application validation gives clients useful messages. Database constraints remain the final defense if a future code path bypasses that validation.
@@ -363,12 +404,12 @@ This is deliberately feature-focused rather than a large ports-and-adapters impl
 
 ### Mutation sequence
 
-Every credit or debit runs in one `@Transactional` method at `READ_COMMITTED` isolation:
+Every credit, debit, or refund runs in one `@Transactional` method at `READ_COMMITTED` isolation:
 
 1. Normalize and validate the request.
 2. Select the wallet row using a JPA `PESSIMISTIC_WRITE` lock (`SELECT ... FOR UPDATE`).
 3. After acquiring the lock, query for `(wallet_id, idempotency_key)`.
-4. If the key exists with the same normalized type, amount, reason, and reference, return that original ledger result without changing balance.
+4. For credits/debits, the key identity is normalized type, amount, reason, and reference. For refunds it is source transaction ID, reason, and reference. An exact match returns the original ledger result without changing balance.
 5. If the key exists with different request data, return `409 IDEMPOTENCY_CONFLICT`.
 6. Validate available funds or arithmetic overflow against the locked balance.
 7. Mutate the wallet snapshot and insert the ledger entry.
@@ -391,13 +432,17 @@ Benefits:
 
 Trade-off: a single extremely busy wallet becomes a serialized hotspot. For this take-home, correctness and clarity outweigh peak same-wallet throughput. A larger system could evaluate optimistic versioning with bounded retries, account partitioning, or an ordered command stream.
 
+### Refund rules
+
+A refund locks the wallet before checking idempotency or refund state. The source must belong to that wallet and be a `DEBIT`; its exact amount is credited without accepting an amount from the client. A unique `reversal_of_entry_id` foreign key is the final defense against double refunds. Same-key retries replay the first refund, while a different key receives `TRANSACTION_ALREADY_REFUNDED`.
+
 ### Failed requests
 
 A failed request does not create a ledger entry and therefore does not consume its idempotency key. A client may correct the state—for example, add funds—and retry the failed debit with that key. Successful operations are durable and replayable.
 
 ## Testing approach
 
-The tests exercise public service or HTTP behavior against real persistence; they do not mock the repositories that enforce locking and uniqueness.
+The main service, API, and concurrency suites exercise behavior against real persistence and do not mock the repositories that enforce locking and uniqueness. The dedicated rollback test replaces the ledger repository only to force a failure after balance mutation and prove transaction rollback.
 
 ### Portable H2 integration suite
 
@@ -414,7 +459,9 @@ The tests exercise public service or HTTP behavior against real persistence; the
 - pagination metadata and no duplicate entries across pages;
 - 20 simultaneous independent credits with an exact final sum;
 - 20 simultaneous debits against funds for only 10, proving exactly 10 succeed and the balance ends at zero;
-- 20 simultaneous submissions of one idempotency key, proving one ledger row and one balance change.
+- 20 simultaneous submissions of one idempotency key, proving one ledger row and one balance change;
+- full refund, replay, invalid source, cross-wallet source hiding, and already-refunded rules;
+- 20 simultaneous refund attempts, proving exactly one refund and one linked ledger row.
 
 `WalletApiIntegrationTest` uses MockMvc to cover:
 
@@ -423,11 +470,12 @@ The tests exercise public service or HTTP behavior against real persistence; the
 - body validation, malformed JSON, missing headers, and malformed UUIDs;
 - structured domain errors;
 - no partial balance change after an API-level insufficient debit;
-- conflicting reuse of an idempotency key.
+- conflicting reuse of an idempotency key;
+- complete refund/replay flow, immutable source linkage, validation, and refund business errors.
 
 ### PostgreSQL concurrency verification
 
-`PostgresWalletConcurrencyIntegrationTest` runs the high-risk concurrent debit and duplicate-delivery scenarios against a Testcontainers PostgreSQL instance. This matters because lock and isolation behavior are database-specific. The test is automatically skipped when Docker is unavailable so contributors can still run the portable suite, but it should be run before submission and in CI with Docker enabled.
+`PostgresWalletConcurrencyIntegrationTest` runs the high-risk concurrent debit, duplicate-delivery, lock-timeout/retry, distinct-key refund, and same-key duplicate-refund scenarios against a Testcontainers PostgreSQL instance. This matters because lock and isolation behavior are database-specific. The test is automatically skipped when Docker is unavailable so contributors can still run the portable suite, but it should be run before submission and in CI with Docker enabled.
 
 H2 is test infrastructure only; the deployed application is configured for PostgreSQL.
 
@@ -452,12 +500,17 @@ H2 is test infrastructure only; the deployed application is configured for Postg
 │   │   │       └── persistence     # restricted Spring Data repositories
 │   │   └── resources
 │   │       ├── application.yml
-│   │       └── db/migration/V1__create_wallet_ledger.sql
+│   │       └── db/migration
+│   │           ├── V1__create_wallet_ledger.sql
+│   │           └── V2__add_transaction_refunds.sql
 │   └── test
 │       ├── java/.../WalletServiceIntegrationTest.java
 │       ├── java/.../WalletApiIntegrationTest.java
 │       ├── java/.../PostgresWalletConcurrencyIntegrationTest.java
-│       └── resources/application-test.yml
+│       ├── java/.../WalletTransactionRollbackIntegrationTest.java
+│       └── resources
+│           ├── application-test.yml
+│           └── application-postgres-test.yml
 └── README.md
 ```
 
@@ -467,7 +520,8 @@ H2 is test infrastructure only; the deployed application is configured for Postg
 - A wallet must be explicitly created before money can move; a missing wallet is not silently created by a credit.
 - Currency is a single, whole-unit in-game currency. There is no currency code or decimal scale. Jackson is configured to reject decimal numeric tokens rather than truncate them into integers.
 - Only successful money movements are recorded. Rejected attempts are visible in application logs but are not audit-ledger rows.
-- Idempotency is scoped to one wallet. The key plus normalized operation type, amount, reason, and reference defines request identity.
+- Idempotency is scoped to one wallet. Credit/debit identity uses normalized operation type, amount, reason, and reference; refund identity uses source transaction ID, reason, and reference.
+- Refunds are full, one-time reversals of debit transactions. Partial refunds and refunding credits or prior refunds are intentionally unsupported.
 - Transaction history is ordered by `created_at DESC, id DESC`. The UUID tie-breaker makes pages deterministic for a fixed data set, but does not represent a business sequence when timestamps are exactly equal. Because this API uses offset pages, transactions inserted between page requests can shift later pages; cursor pagination backed by a per-wallet sequence would provide stable traversal under concurrent writes.
 - The ledger is append-only through this application, but a privileged database administrator can still modify rows. Production hardening could use separate database roles, update/delete-denying triggers, or immutable archival storage.
 - This is a single-database service. It does not publish events or coordinate external side effects. An outbox pattern would be required before reliably notifying other systems.

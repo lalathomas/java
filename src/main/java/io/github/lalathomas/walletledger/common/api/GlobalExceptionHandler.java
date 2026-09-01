@@ -69,10 +69,10 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             HttpServletRequest request
     ) {
         log.error("Unexpected database constraint violation for path={}", request.getRequestURI(), exception);
-        return ResponseEntity.status(HttpStatus.CONFLICT).body(errorBody(
-                HttpStatus.CONFLICT,
-                "DATABASE_CONSTRAINT_VIOLATION",
-                "The request conflicts with existing data",
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorBody(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "An unexpected error occurred",
                 request.getRequestURI(),
                 Map.of(),
                 Map.of()
@@ -171,11 +171,58 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         ));
     }
 
+    @Override
+    protected ResponseEntity<Object> handleExceptionInternal(
+            Exception exception,
+            Object body,
+            HttpHeaders headers,
+            HttpStatusCode statusCode,
+            WebRequest request
+    ) {
+        HttpStatus status = HttpStatus.resolve(statusCode.value());
+        if (status == null) {
+            status = HttpStatus.INTERNAL_SERVER_ERROR;
+        }
+        return ResponseEntity.status(status)
+                .headers(headers)
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .body(errorBody(
+                        status,
+                        httpErrorCode(status),
+                        httpErrorMessage(status),
+                        pathFrom(request),
+                        Map.of(),
+                        Map.of()
+                ));
+    }
+
+    private static String httpErrorCode(HttpStatus status) {
+        return switch (status) {
+            case NOT_FOUND -> "RESOURCE_NOT_FOUND";
+            case METHOD_NOT_ALLOWED -> "METHOD_NOT_ALLOWED";
+            case NOT_ACCEPTABLE -> "NOT_ACCEPTABLE";
+            case UNSUPPORTED_MEDIA_TYPE -> "UNSUPPORTED_MEDIA_TYPE";
+            default -> "HTTP_ERROR";
+        };
+    }
+
+    private static String httpErrorMessage(HttpStatus status) {
+        return switch (status) {
+            case NOT_FOUND -> "The requested resource was not found";
+            case METHOD_NOT_ALLOWED -> "The HTTP method is not supported for this resource";
+            case NOT_ACCEPTABLE -> "The requested response media type is not supported";
+            case UNSUPPORTED_MEDIA_TYPE -> "The request media type is not supported";
+            default -> "The request could not be completed";
+        };
+    }
+
     private static HttpStatus statusFor(WalletErrorCode code) {
         return switch (code) {
-            case WALLET_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case WALLET_ALREADY_EXISTS, IDEMPOTENCY_CONFLICT -> HttpStatus.CONFLICT;
-            case INSUFFICIENT_FUNDS, BALANCE_OVERFLOW -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case WALLET_NOT_FOUND, TRANSACTION_NOT_FOUND -> HttpStatus.NOT_FOUND;
+            case WALLET_ALREADY_EXISTS, IDEMPOTENCY_CONFLICT, TRANSACTION_ALREADY_REFUNDED ->
+                    HttpStatus.CONFLICT;
+            case INSUFFICIENT_FUNDS, BALANCE_OVERFLOW, TRANSACTION_NOT_REFUNDABLE ->
+                    HttpStatus.UNPROCESSABLE_ENTITY;
             case INVALID_AMOUNT, INVALID_REQUEST -> HttpStatus.BAD_REQUEST;
         };
     }

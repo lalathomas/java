@@ -12,6 +12,7 @@ public record LedgerEntryView(
         long balanceAfter,
         String reason,
         String referenceId,
+        UUID reversalOfTransactionId,
         Instant createdAt
 ) {
 }

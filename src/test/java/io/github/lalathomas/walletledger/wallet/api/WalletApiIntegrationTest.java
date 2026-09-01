@@ -208,6 +208,173 @@ class WalletApiIntegrationTest {
                 .andExpect(jsonPath("$.balance").value(10));
     }
 
+    @Test
+    void returnsConsistentErrorsForStandardHttpFailures() throws Exception {
+        UUID playerId = createWallet();
+
+        mockMvc.perform(get("/api/v1/unknown-resource"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.code").value("RESOURCE_NOT_FOUND"))
+                .andExpect(jsonPath("$.path").value("/api/v1/unknown-resource"));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .put("/api/v1/wallets/{playerId}/balance", playerId))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(jsonPath("$.code").value("METHOD_NOT_ALLOWED"));
+
+        mockMvc.perform(post("/api/v1/wallets")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("not-json"))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"));
+
+        mockMvc.perform(get("/api/v1/wallets/{playerId}/balance", playerId)
+                        .accept(MediaType.APPLICATION_XML))
+                .andExpect(status().isNotAcceptable())
+                .andExpect(jsonPath("$.code").value("NOT_ACCEPTABLE"));
+    }
+
+    @Test
+    void rejectsInvalidPaginationAndIdempotencyKeyBoundaries() throws Exception {
+        UUID playerId = createWallet();
+
+        mockMvc.perform(get("/api/v1/wallets/{playerId}/transactions", playerId)
+                        .queryParam("page", "-1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        mockMvc.perform(get("/api/v1/wallets/{playerId}/transactions", playerId)
+                        .queryParam("size", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        mockMvc.perform(post("/api/v1/wallets/{playerId}/credits", playerId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "invalid key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(movementBody(1, "Reward", "reward-1")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        mockMvc.perform(post("/api/v1/wallets/{playerId}/credits", playerId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "x".repeat(101))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(movementBody(1, "Reward", "reward-1")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    void mapsDuplicateWalletAndBalanceOverflowWithoutPartialChanges() throws Exception {
+        UUID playerId = createWallet();
+        String createBody = objectMapper.writeValueAsString(Map.of("playerId", playerId));
+
+        mockMvc.perform(post("/api/v1/wallets")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(createBody))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("WALLET_ALREADY_EXISTS"));
+
+        mockMvc.perform(post("/api/v1/wallets/{playerId}/credits", playerId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "maximum-credit")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(movementBody(Long.MAX_VALUE, "Maximum", "maximum-1")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balanceAfter").value(Long.MAX_VALUE));
+
+        mockMvc.perform(post("/api/v1/wallets/{playerId}/credits", playerId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "overflow-credit")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(movementBody(1, "Overflow", "overflow-1")))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("BALANCE_OVERFLOW"));
+
+        mockMvc.perform(get("/api/v1/wallets/{playerId}/balance", playerId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance").value(Long.MAX_VALUE));
+    }
+
+    @Test
+    void refundsDebitWithAuditLinkAndEnforcesRefundRules() throws Exception {
+        UUID playerId = createWallet();
+        MvcResult creditResult = mockMvc.perform(post("/api/v1/wallets/{playerId}/credits", playerId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "refund-flow-credit")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(movementBody(100, "Initial balance", "refund-flow-initial")))
+                .andExpect(status().isOk())
+                .andReturn();
+        String creditTransactionId = objectMapper.readTree(
+                creditResult.getResponse().getContentAsString()
+        ).get("transactionId").asText();
+
+        MvcResult debitResult = mockMvc.perform(post("/api/v1/wallets/{playerId}/debits", playerId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "refund-flow-debit")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(movementBody(35, "Shop purchase", "refund-flow-purchase")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balanceAfter").value(65))
+                .andReturn();
+        String debitTransactionId = objectMapper.readTree(
+                debitResult.getResponse().getContentAsString()
+        ).get("transactionId").asText();
+        String refundBody = objectMapper.writeValueAsString(Map.of(
+                "reason", "Purchase cancelled",
+                "referenceId", "support-ticket-35"
+        ));
+        String refundPath = "/api/v1/wallets/{playerId}/transactions/{transactionId}/refund";
+
+        MvcResult refundResult = mockMvc.perform(post(refundPath, playerId, debitTransactionId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "refund-flow-refund")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refundBody))
+                .andExpect(status().isOk())
+                .andExpect(header().string(WalletController.IDEMPOTENT_REPLAYED_HEADER, "false"))
+                .andExpect(jsonPath("$.type").value("REFUND"))
+                .andExpect(jsonPath("$.amount").value(35))
+                .andExpect(jsonPath("$.balanceAfter").value(100))
+                .andExpect(jsonPath("$.reversalOfTransactionId").value(debitTransactionId))
+                .andExpect(jsonPath("$.replayed").value(false))
+                .andReturn();
+        String refundTransactionId = objectMapper.readTree(
+                refundResult.getResponse().getContentAsString()
+        ).get("transactionId").asText();
+
+        mockMvc.perform(post(refundPath, playerId, debitTransactionId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "refund-flow-refund")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refundBody))
+                .andExpect(status().isOk())
+                .andExpect(header().string(WalletController.IDEMPOTENT_REPLAYED_HEADER, "true"))
+                .andExpect(jsonPath("$.transactionId").value(refundTransactionId))
+                .andExpect(jsonPath("$.replayed").value(true));
+
+        mockMvc.perform(post(refundPath, playerId, debitTransactionId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "second-refund-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refundBody))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("TRANSACTION_ALREADY_REFUNDED"))
+                .andExpect(jsonPath("$.details.refundTransactionId").value(refundTransactionId));
+
+        mockMvc.perform(post(refundPath, playerId, creditTransactionId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "refund-credit-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refundBody))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("TRANSACTION_NOT_REFUNDABLE"));
+
+        mockMvc.perform(post(refundPath, playerId, debitTransactionId)
+                        .header(WalletController.IDEMPOTENCY_KEY_HEADER, "invalid-refund-body")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+
+        mockMvc.perform(get("/api/v1/wallets/{playerId}/balance", playerId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balance").value(100));
+    }
+
     private UUID createWallet() throws Exception {
         UUID playerId = UUID.randomUUID();
         mockMvc.perform(post("/api/v1/wallets")

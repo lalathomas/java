@@ -25,6 +25,26 @@ public interface LedgerEntryRepository extends Repository<LedgerEntry, UUID> {
             @Param("idempotencyKey") String idempotencyKey
     );
 
+    @Query("""
+            select entry
+            from LedgerEntry entry
+            where entry.id = :transactionId
+              and entry.wallet.id = :walletId
+            """)
+    Optional<LedgerEntry> findByIdAndWalletId(
+            @Param("transactionId") UUID transactionId,
+            @Param("walletId") Long walletId
+    );
+
+    @Query("""
+            select entry
+            from LedgerEntry entry
+            where entry.reversalOfEntryId = :transactionId
+            """)
+    Optional<LedgerEntry> findRefundByTransactionId(
+            @Param("transactionId") UUID transactionId
+    );
+
     @Query(
             value = """
                     select entry

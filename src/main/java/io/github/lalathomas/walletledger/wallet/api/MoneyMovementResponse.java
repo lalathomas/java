@@ -15,6 +15,7 @@ public record MoneyMovementResponse(
         String reason,
         String referenceId,
         String idempotencyKey,
+        UUID reversalOfTransactionId,
         Instant createdAt,
         boolean replayed
 ) {
@@ -28,6 +29,7 @@ public record MoneyMovementResponse(
                 result.reason(),
                 result.referenceId(),
                 result.idempotencyKey(),
+                result.reversalOfTransactionId(),
                 result.createdAt(),
                 result.replayed()
         );

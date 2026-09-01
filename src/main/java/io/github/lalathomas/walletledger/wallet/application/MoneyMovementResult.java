@@ -14,6 +14,7 @@ public record MoneyMovementResult(
         String reason,
         String referenceId,
         String idempotencyKey,
+        UUID reversalOfTransactionId,
         Instant createdAt,
         boolean replayed
 ) {

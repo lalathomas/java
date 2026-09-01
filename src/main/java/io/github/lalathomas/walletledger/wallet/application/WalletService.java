@@ -75,6 +75,89 @@ public class WalletService {
         return applyMovement(playerId, TransactionType.DEBIT, command);
     }
 
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public MoneyMovementResult refund(
+            UUID playerId,
+            UUID transactionId,
+            RefundCommand command
+    ) {
+        UUID validatedPlayerId = requirePlayerId(playerId);
+        UUID validatedTransactionId = requireTransactionId(transactionId);
+        ValidatedRefund refund = validateRefund(command);
+
+        // Refunds serialize with every other mutation for this wallet. Checking idempotency first
+        // preserves replay semantics even after the original debit has already been refunded.
+        Wallet wallet = walletRepository.findByPlayerIdForUpdate(validatedPlayerId)
+                .orElseThrow(() -> WalletException.walletNotFound(validatedPlayerId));
+
+        LedgerEntry existingEntry = ledgerEntryRepository.findByWalletIdAndIdempotencyKey(
+                wallet.getId(), refund.idempotencyKey()
+        ).orElse(null);
+        if (existingEntry != null) {
+            if (!existingEntry.representsRefund(
+                    validatedTransactionId,
+                    refund.reason(),
+                    refund.referenceId()
+            )) {
+                throw WalletException.idempotencyConflict(
+                        validatedPlayerId,
+                        refund.idempotencyKey()
+                );
+            }
+            return toResult(existingEntry, true);
+        }
+
+        LedgerEntry originalEntry = ledgerEntryRepository.findByIdAndWalletId(
+                validatedTransactionId,
+                wallet.getId()
+        ).orElseThrow(() -> WalletException.transactionNotFound(
+                validatedPlayerId,
+                validatedTransactionId
+        ));
+
+        if (originalEntry.getType() != TransactionType.DEBIT) {
+            throw WalletException.transactionNotRefundable(
+                    validatedTransactionId,
+                    originalEntry.getType()
+            );
+        }
+
+        LedgerEntry priorRefund = ledgerEntryRepository.findRefundByTransactionId(
+                validatedTransactionId
+        ).orElse(null);
+        if (priorRefund != null) {
+            throw WalletException.transactionAlreadyRefunded(
+                    validatedTransactionId,
+                    priorRefund.getId()
+            );
+        }
+
+        long balanceAfter = applyCredit(
+                wallet,
+                originalEntry.getAmount(),
+                validatedPlayerId
+        );
+        LedgerEntry refundEntry = ledgerEntryRepository.save(LedgerEntry.refund(
+                wallet,
+                originalEntry.getAmount(),
+                balanceAfter,
+                refund.reason(),
+                refund.referenceId(),
+                refund.idempotencyKey(),
+                validatedTransactionId
+        ));
+
+        log.info(
+                "Refunded wallet transaction playerId={} transactionId={} refundTransactionId={} amount={} balanceAfter={}",
+                validatedPlayerId,
+                validatedTransactionId,
+                refundEntry.getId(),
+                refundEntry.getAmount(),
+                balanceAfter
+        );
+        return toResult(refundEntry, false);
+    }
+
     @Transactional(readOnly = true)
     public TransactionHistory getHistory(UUID playerId, int page, int size) {
         UUID validatedPlayerId = requirePlayerId(playerId);
@@ -139,6 +222,7 @@ public class WalletService {
         long balanceAfter = switch (type) {
             case CREDIT -> applyCredit(wallet, movement.amount(), validatedPlayerId);
             case DEBIT -> applyDebit(wallet, movement.amount(), validatedPlayerId);
+            case REFUND -> throw new IllegalArgumentException("Refunds must use the refund operation");
         };
 
         LedgerEntry entry = ledgerEntryRepository.save(new LedgerEntry(
@@ -184,6 +268,13 @@ public class WalletService {
         return playerId;
     }
 
+    private static UUID requireTransactionId(UUID transactionId) {
+        if (transactionId == null) {
+            throw WalletException.invalidRequest("transactionId is required");
+        }
+        return transactionId;
+    }
+
     private static ValidatedMovement validateMovement(MoneyMovementCommand command) {
         if (command == null) {
             throw WalletException.invalidRequest("Money movement request is required");
@@ -192,14 +283,28 @@ public class WalletService {
             throw WalletException.invalidAmount(command.amount());
         }
 
-        String reason = normalizeRequired(command.reason(), "reason", MAX_REASON_LENGTH);
-        String referenceId = normalizeRequired(
-                command.referenceId(),
-                "referenceId",
-                MAX_REFERENCE_LENGTH
+        return new ValidatedMovement(
+                command.amount(),
+                normalizeRequired(command.reason(), "reason", MAX_REASON_LENGTH),
+                normalizeRequired(command.referenceId(), "referenceId", MAX_REFERENCE_LENGTH),
+                normalizeIdempotencyKey(command.idempotencyKey())
         );
+    }
+
+    private static ValidatedRefund validateRefund(RefundCommand command) {
+        if (command == null) {
+            throw WalletException.invalidRequest("Refund request is required");
+        }
+        return new ValidatedRefund(
+                normalizeRequired(command.reason(), "reason", MAX_REASON_LENGTH),
+                normalizeRequired(command.referenceId(), "referenceId", MAX_REFERENCE_LENGTH),
+                normalizeIdempotencyKey(command.idempotencyKey())
+        );
+    }
+
+    private static String normalizeIdempotencyKey(String value) {
         String idempotencyKey = normalizeRequired(
-                command.idempotencyKey(),
+                value,
                 "Idempotency-Key",
                 MAX_IDEMPOTENCY_KEY_LENGTH
         );
@@ -209,8 +314,7 @@ public class WalletService {
                             + "letters, numbers, '.', '_', ':' or '-' (maximum 100 characters)"
             );
         }
-
-        return new ValidatedMovement(command.amount(), reason, referenceId, idempotencyKey);
+        return idempotencyKey;
     }
 
     private static String normalizeRequired(String value, String fieldName, int maximumLength) {
@@ -254,6 +358,7 @@ public class WalletService {
                 entry.getReason(),
                 entry.getReferenceId(),
                 entry.getIdempotencyKey(),
+                entry.getReversalOfEntryId(),
                 entry.getCreatedAt(),
                 replayed
         );
@@ -267,12 +372,20 @@ public class WalletService {
                 entry.getBalanceAfter(),
                 entry.getReason(),
                 entry.getReferenceId(),
+                entry.getReversalOfEntryId(),
                 entry.getCreatedAt()
         );
     }
 
     private record ValidatedMovement(
             long amount,
+            String reason,
+            String referenceId,
+            String idempotencyKey
+    ) {
+    }
+
+    private record ValidatedRefund(
             String reason,
             String referenceId,
             String idempotencyKey

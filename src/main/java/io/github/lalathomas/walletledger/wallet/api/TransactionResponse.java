@@ -13,6 +13,7 @@ public record TransactionResponse(
         long balanceAfter,
         String reason,
         String referenceId,
+        UUID reversalOfTransactionId,
         Instant createdAt
 ) {
     public static TransactionResponse from(LedgerEntryView entry) {
@@ -23,6 +24,7 @@ public record TransactionResponse(
                 entry.balanceAfter(),
                 entry.reason(),
                 entry.referenceId(),
+                entry.reversalOfTransactionId(),
                 entry.createdAt()
         );
     }
