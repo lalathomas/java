@@ -13,6 +13,8 @@ public record LedgerEntryView(
         String reason,
         String referenceId,
         UUID reversalOfTransactionId,
+        UUID transferId,
+        UUID reservationId,
         Instant createdAt
 ) {
 }

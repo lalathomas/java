@@ -35,6 +35,7 @@ class WalletServiceIntegrationTest {
     @BeforeEach
     void cleanDatabase() {
         jdbcTemplate.update("DELETE FROM ledger_entries");
+        jdbcTemplate.update("DELETE FROM fund_reservations");
         jdbcTemplate.update("DELETE FROM wallets");
     }
 

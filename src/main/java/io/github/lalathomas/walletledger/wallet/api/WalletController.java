@@ -1,6 +1,11 @@
 package io.github.lalathomas.walletledger.wallet.api;
 
 import io.github.lalathomas.walletledger.wallet.application.MoneyMovementResult;
+import io.github.lalathomas.walletledger.wallet.application.ReservationResult;
+import io.github.lalathomas.walletledger.wallet.application.ReservationService;
+import io.github.lalathomas.walletledger.wallet.application.TransferResult;
+import io.github.lalathomas.walletledger.wallet.application.TransferService;
+import io.github.lalathomas.walletledger.wallet.application.WalletReconciliationService;
 import io.github.lalathomas.walletledger.wallet.application.WalletService;
 import io.github.lalathomas.walletledger.wallet.application.WalletSnapshot;
 import jakarta.validation.Valid;
@@ -28,9 +33,20 @@ public class WalletController {
     static final String IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed";
 
     private final WalletService walletService;
+    private final TransferService transferService;
+    private final ReservationService reservationService;
+    private final WalletReconciliationService reconciliationService;
 
-    public WalletController(WalletService walletService) {
+    public WalletController(
+            WalletService walletService,
+            TransferService transferService,
+            ReservationService reservationService,
+            WalletReconciliationService reconciliationService
+    ) {
         this.walletService = walletService;
+        this.transferService = transferService;
+        this.reservationService = reservationService;
+        this.reconciliationService = reconciliationService;
     }
 
     @PostMapping
@@ -40,55 +56,94 @@ public class WalletController {
         WalletSnapshot wallet = walletService.createWallet(request.playerId());
         URI location = ServletUriComponentsBuilder.fromCurrentRequest()
                 .path("/{playerId}/balance")
-                .buildAndExpand(wallet.playerId())
-                .toUri();
+                .buildAndExpand(wallet.playerId()).toUri();
         return ResponseEntity.created(location).body(WalletResponse.from(wallet));
     }
 
     @PostMapping("/{playerId}/credits")
     public ResponseEntity<MoneyMovementResponse> credit(
             @PathVariable UUID playerId,
-            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String idempotencyKey,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
             @Valid @RequestBody MoneyMovementRequest request
     ) {
-        MoneyMovementResult result = walletService.credit(
-                playerId,
-                request.toCommand(idempotencyKey)
-        );
-        return movementResponse(result);
+        return movementResponse(walletService.credit(playerId, request.toCommand(key)));
     }
 
     @PostMapping("/{playerId}/debits")
     public ResponseEntity<MoneyMovementResponse> debit(
             @PathVariable UUID playerId,
-            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String idempotencyKey,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
             @Valid @RequestBody MoneyMovementRequest request
     ) {
-        MoneyMovementResult result = walletService.debit(
-                playerId,
-                request.toCommand(idempotencyKey)
-        );
-        return movementResponse(result);
+        return movementResponse(walletService.debit(playerId, request.toCommand(key)));
     }
 
     @PostMapping("/{playerId}/transactions/{transactionId}/refund")
     public ResponseEntity<MoneyMovementResponse> refund(
             @PathVariable UUID playerId,
             @PathVariable UUID transactionId,
-            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String idempotencyKey,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
             @Valid @RequestBody RefundRequest request
     ) {
-        MoneyMovementResult result = walletService.refund(
-                playerId,
-                transactionId,
-                request.toCommand(idempotencyKey)
+        return movementResponse(walletService.refund(
+                playerId, transactionId, request.toCommand(key)
+        ));
+    }
+
+    @PostMapping("/{playerId}/transfers")
+    public ResponseEntity<TransferResponse> transfer(
+            @PathVariable UUID playerId,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
+            @Valid @RequestBody TransferRequest request
+    ) {
+        TransferResult result = transferService.transfer(playerId, request.toCommand(key));
+        return replayResponse(TransferResponse.from(result), result.replayed());
+    }
+
+    @PostMapping("/{playerId}/reservations")
+    public ResponseEntity<ReservationResponse> reserve(
+            @PathVariable UUID playerId,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
+            @Valid @RequestBody CreateReservationRequest request
+    ) {
+        ReservationResult result = reservationService.reserve(playerId, request.toCommand(key));
+        return replayResponse(ReservationResponse.from(result), result.replayed());
+    }
+
+    @PostMapping("/{playerId}/reservations/{reservationId}/capture")
+    public ResponseEntity<ReservationResponse> capture(
+            @PathVariable UUID playerId,
+            @PathVariable UUID reservationId,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
+            @Valid @RequestBody ReservationActionRequest request
+    ) {
+        ReservationResult result = reservationService.capture(
+                playerId, reservationId, request.toCommand(key)
         );
-        return movementResponse(result);
+        return replayResponse(ReservationResponse.from(result), result.replayed());
+    }
+
+    @PostMapping("/{playerId}/reservations/{reservationId}/release")
+    public ResponseEntity<ReservationResponse> release(
+            @PathVariable UUID playerId,
+            @PathVariable UUID reservationId,
+            @RequestHeader(IDEMPOTENCY_KEY_HEADER) String key,
+            @Valid @RequestBody ReservationActionRequest request
+    ) {
+        ReservationResult result = reservationService.release(
+                playerId, reservationId, request.toCommand(key)
+        );
+        return replayResponse(ReservationResponse.from(result), result.replayed());
     }
 
     @GetMapping("/{playerId}/balance")
     public BalanceResponse getBalance(@PathVariable UUID playerId) {
         return BalanceResponse.from(walletService.getBalance(playerId));
+    }
+
+    @GetMapping("/{playerId}/reconciliation")
+    public ReconciliationResponse reconcile(@PathVariable UUID playerId) {
+        return ReconciliationResponse.from(reconciliationService.reconcile(playerId));
     }
 
     @GetMapping("/{playerId}/transactions")
@@ -103,8 +158,12 @@ public class WalletController {
     private static ResponseEntity<MoneyMovementResponse> movementResponse(
             MoneyMovementResult result
     ) {
+        return replayResponse(MoneyMovementResponse.from(result), result.replayed());
+    }
+
+    private static <T> ResponseEntity<T> replayResponse(T body, boolean replayed) {
         HttpHeaders headers = new HttpHeaders();
-        headers.set(IDEMPOTENT_REPLAYED_HEADER, Boolean.toString(result.replayed()));
-        return new ResponseEntity<>(MoneyMovementResponse.from(result), headers, HttpStatus.OK);
+        headers.set(IDEMPOTENT_REPLAYED_HEADER, Boolean.toString(replayed));
+        return new ResponseEntity<>(body, headers, HttpStatus.OK);
     }
 }

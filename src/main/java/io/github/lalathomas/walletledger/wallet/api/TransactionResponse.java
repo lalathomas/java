@@ -14,18 +14,15 @@ public record TransactionResponse(
         String reason,
         String referenceId,
         UUID reversalOfTransactionId,
+        UUID transferId,
+        UUID reservationId,
         Instant createdAt
 ) {
     public static TransactionResponse from(LedgerEntryView entry) {
         return new TransactionResponse(
-                entry.transactionId(),
-                entry.type(),
-                entry.amount(),
-                entry.balanceAfter(),
-                entry.reason(),
-                entry.referenceId(),
-                entry.reversalOfTransactionId(),
-                entry.createdAt()
+                entry.transactionId(), entry.type(), entry.amount(), entry.balanceAfter(),
+                entry.reason(), entry.referenceId(), entry.reversalOfTransactionId(),
+                entry.transferId(), entry.reservationId(), entry.createdAt()
         );
     }
 }

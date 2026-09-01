@@ -218,8 +218,10 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static HttpStatus statusFor(WalletErrorCode code) {
         return switch (code) {
-            case WALLET_NOT_FOUND, TRANSACTION_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case WALLET_ALREADY_EXISTS, IDEMPOTENCY_CONFLICT, TRANSACTION_ALREADY_REFUNDED ->
+            case WALLET_NOT_FOUND, TRANSACTION_NOT_FOUND, RESERVATION_NOT_FOUND ->
+                    HttpStatus.NOT_FOUND;
+            case WALLET_ALREADY_EXISTS, IDEMPOTENCY_CONFLICT,
+                    TRANSACTION_ALREADY_REFUNDED, RESERVATION_NOT_ACTIVE ->
                     HttpStatus.CONFLICT;
             case INSUFFICIENT_FUNDS, BALANCE_OVERFLOW, TRANSACTION_NOT_REFUNDABLE ->
                     HttpStatus.UNPROCESSABLE_ENTITY;

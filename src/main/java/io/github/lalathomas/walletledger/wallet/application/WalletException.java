@@ -114,6 +114,31 @@ public final class WalletException extends RuntimeException {
         );
     }
 
+    public static WalletException reservationNotFound(UUID playerId, UUID reservationId) {
+        return new WalletException(
+                WalletErrorCode.RESERVATION_NOT_FOUND,
+                "The reservation was not found in this wallet",
+                Map.of(
+                        "playerId", playerId.toString(),
+                        "reservationId", reservationId.toString()
+                )
+        );
+    }
+
+    public static WalletException reservationNotActive(
+            UUID reservationId,
+            io.github.lalathomas.walletledger.wallet.domain.ReservationStatus status
+    ) {
+        return new WalletException(
+                WalletErrorCode.RESERVATION_NOT_ACTIVE,
+                "The reservation is no longer active",
+                Map.of(
+                        "reservationId", reservationId.toString(),
+                        "status", status.name()
+                )
+        );
+    }
+
     public WalletErrorCode getCode() {
         return code;
     }

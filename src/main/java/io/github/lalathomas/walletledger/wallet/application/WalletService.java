@@ -222,7 +222,10 @@ public class WalletService {
         long balanceAfter = switch (type) {
             case CREDIT -> applyCredit(wallet, movement.amount(), validatedPlayerId);
             case DEBIT -> applyDebit(wallet, movement.amount(), validatedPlayerId);
-            case REFUND -> throw new IllegalArgumentException("Refunds must use the refund operation");
+            case REFUND, TRANSFER_OUT, TRANSFER_IN, RESERVE, RELEASE ->
+                    throw new IllegalArgumentException(
+                            "This transaction type requires its dedicated operation"
+                    );
         };
 
         LedgerEntry entry = ledgerEntryRepository.save(new LedgerEntry(
@@ -255,8 +258,12 @@ public class WalletService {
     }
 
     private static long applyDebit(Wallet wallet, long amount, UUID playerId) {
-        if (amount > wallet.getBalance()) {
-            throw WalletException.insufficientFunds(playerId, amount, wallet.getBalance());
+        if (amount > wallet.getAvailableBalance()) {
+            throw WalletException.insufficientFunds(
+                    playerId,
+                    amount,
+                    wallet.getAvailableBalance()
+            );
         }
         return wallet.debit(amount);
     }
@@ -373,6 +380,8 @@ public class WalletService {
                 entry.getReason(),
                 entry.getReferenceId(),
                 entry.getReversalOfEntryId(),
+                entry.getTransferId(),
+                entry.getReservationId(),
                 entry.getCreatedAt()
         );
     }

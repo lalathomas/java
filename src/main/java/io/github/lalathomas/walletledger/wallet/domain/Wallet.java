@@ -27,6 +27,9 @@ public class Wallet {
     @Column(name = "balance", nullable = false)
     private long balance;
 
+    @Column(name = "reserved_balance", nullable = false)
+    private long reservedBalance;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -40,6 +43,7 @@ public class Wallet {
     public Wallet(UUID playerId) {
         this.playerId = Objects.requireNonNull(playerId, "playerId must not be null");
         this.balance = 0L;
+        this.reservedBalance = 0L;
     }
 
     @PrePersist
@@ -62,11 +66,37 @@ public class Wallet {
 
     public long debit(long amount) {
         requirePositive(amount);
-        if (amount > this.balance) {
-            throw new IllegalStateException("A wallet balance cannot become negative");
+        if (amount > getAvailableBalance()) {
+            throw new IllegalStateException("A wallet cannot spend reserved funds");
         }
         this.balance = Math.subtractExact(this.balance, amount);
         return this.balance;
+    }
+
+    public void reserve(long amount) {
+        requirePositive(amount);
+        if (amount > getAvailableBalance()) {
+            throw new IllegalStateException("A wallet cannot reserve unavailable funds");
+        }
+        this.reservedBalance = Math.addExact(this.reservedBalance, amount);
+    }
+
+    public long captureReservation(long amount) {
+        requirePositive(amount);
+        if (amount > this.reservedBalance || amount > this.balance) {
+            throw new IllegalStateException("Reserved funds are inconsistent with the wallet");
+        }
+        this.reservedBalance = Math.subtractExact(this.reservedBalance, amount);
+        this.balance = Math.subtractExact(this.balance, amount);
+        return this.balance;
+    }
+
+    public void releaseReservation(long amount) {
+        requirePositive(amount);
+        if (amount > this.reservedBalance) {
+            throw new IllegalStateException("Cannot release more than the reserved balance");
+        }
+        this.reservedBalance = Math.subtractExact(this.reservedBalance, amount);
     }
 
     private static void requirePositive(long amount) {
@@ -85,6 +115,14 @@ public class Wallet {
 
     public long getBalance() {
         return balance;
+    }
+
+    public long getReservedBalance() {
+        return reservedBalance;
+    }
+
+    public long getAvailableBalance() {
+        return balance - reservedBalance;
     }
 
     public Instant getCreatedAt() {
