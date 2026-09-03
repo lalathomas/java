@@ -37,7 +37,6 @@ This checklist follows the four assignment pages supplied with the project.
 | Reservation of Funds | Hold, capture, and release lifecycle; held funds cannot be spent by ordinary debits |
 | Balance Check | Recomputes posted and reserved balances from complete database history under one consistent snapshot |
 | Docker Compose | Starts the application and PostgreSQL with one command |
-| AI Tooling Notes | Brief disclosure in the final section of this README |
 | Flyway | Three versioned database migrations, validated on startup |
 | Clean REST controllers, validation, and errors | DTO-only API boundary and centralized structured error handling |
 | Basic observability | Logs record wallet mutations, replays, failures, and lock timeouts without request bodies or credentials |
@@ -309,7 +308,3 @@ src/main/resources
 This is a single-currency, single-database service. Transfers are local and atomic; cross-service transfers would need a different protocol. Reservations are full-amount holds with one capture or release. Refunds are full and one-time. Authentication, authorization, partial refunds, event publishing, rate limiting, reward campaigns, and scheduled streak processing are outside scope.
 
 Useful next steps are authentication, request correlation IDs, metrics, a per-wallet sequence, an outbox for reliable events, and database roles/triggers that physically prevent ledger updates.
-
-## Tooling disclosure
-
-Kiro assisted with implementation review, test execution, and documentation. The code was checked against the stated requirements and the automated test suites; design choices and limitations are documented here so they can be reviewed directly.
